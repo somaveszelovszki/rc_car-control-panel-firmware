@@ -1,76 +1,64 @@
-#include <micro/hw/VL53L1X_DistanceSensor.hpp>
+#include <micro/debug/DebugLed.hpp>
 #include <micro/math/unit_utils.hpp>
-#include <micro/panel/DistSensorPanelData.hpp>
 #include <micro/utils/timer.hpp>
-#include <micro/utils/task.hpp>
-#include <cfg_board.h>
+#include <micro/port/task.hpp>
+
+#include <cfg_board.hpp>
 
 using namespace micro;
 
 namespace {
 
-hw::VL53L1X_DistanceSensor sensor(i2c_Sensor, 0x52);
-PanelLink<DistSensorPanelInData, DistSensorPanelOutData> panelLink(panelLinkRole_t::Slave, uart_PanelLink);
+constexpr uint32_t INPUT_CHANNEL_ACCEL_OFFSET = 80;
+constexpr uint32_t INPUT_CHANNEL_STEER_OFFSET = 35;
+constexpr float INPUT_ZERO_DEADBAND           = 0.1f;
 
-meter_t distance;
+void onRcCtrlInputCapture(const uint32_t chnl, uint32_t& prevCntr, const uint32_t offset, float& measuredValue) {
+    uint32_t cntr = 0;
+    timer_getCaptured(tim_RcCtrl, chnl, cntr);
 
-void parseDistSensorPanelData(const DistSensorPanelInData& rxData) {
-    UNUSED(rxData);
+    uint32_t duty = (cntr >= prevCntr ? cntr - prevCntr : tim_RcCtrl.handle->Instance->ARR - prevCntr + cntr) - offset;
+    if (duty > 850 && duty < 2150) {
+        float input = map<uint32_t, float>(duty, 1000, 2000, -1.0f, 1.0f);
+        if (abs(input) < INPUT_ZERO_DEADBAND) {
+            input = 0.0f;
+        }
+
+        criticalSection_t criticalSection;
+        criticalSection.lock();
+        measuredValue = input;
+        criticalSection.unlock();
+    }
+    prevCntr = cntr;
 }
 
-void fillDistSensorPanelData(DistSensorPanelOutData& txData) {
-    txData.distance_mm = static_cast<uint16_t>(static_cast<millimeter_t>(distance).get());
-}
+float acceleration = 0.0f;
+float steering     = 0.0f;
 
 } // namespace
 
 extern "C" void run(void) {
-    sensor.initialize();
-
-    os_delay(50);
-
-    DistSensorPanelInData rxData;
-    DistSensorPanelOutData txData;
-
-    millisecond_t prevReadTime = getTime();
-    bool isSensorOk = false;
-
-    Timer sensorReadTimer(millisecond_t(10));
-    Timer ledBlinkTimer(millisecond_t(250));
+    DebugLed debugLed(gpio_Led);
 
     while (true) {
-        panelLink.update();
+        criticalSection_t criticalSection;
+        criticalSection.lock();
+        const float accel = acceleration;
+        const float steer = steering;
+        criticalSection.unlock();
 
-        if (sensorReadTimer.checkTimeout()) {
-            if (isOk(sensor.readDistance(distance))) {
-                isSensorOk = true;
-
-                if (distance > centimeter_t(200)) {
-                    distance = micro::numeric_limits<meter_t>::infinity();
-                }
-
-                prevReadTime = getTime();
-            } else if (getTime() - prevReadTime > millisecond_t(100)) {
-                distance = meter_t(0);
-                isSensorOk = false;
-                prevReadTime = getTime();
-                // TODO
-            }
-        }
-
-        if (panelLink.readAvailable(rxData)) {
-            parseDistSensorPanelData(rxData);
-        }
-
-        if (panelLink.shouldSend()) {
-            fillDistSensorPanelData(txData);
-            panelLink.send(txData);
-        }
-
-        ledBlinkTimer.setPeriod(millisecond_t(isSensorOk && panelLink.isConnected() ? 500 : 250));
-        if (ledBlinkTimer.checkTimeout()) {
-            HAL_GPIO_TogglePin(gpio_Led, gpioPin_Led);
-        }
+        timer_setDuty(tim_Drive, timChnl_DriveAccel, accel);
+        timer_setCompare(tim_Drive, timChnl_DriveSteer, map<float, uint32_t>(steer, -1.0f, 1.0f, 1000, 2000));
+        debugLed.update(true);
     }
 }
 
+void tim_RcCtrlAccel_IC_CaptureCallback() {
+    static uint32_t cntr = 0;
+    onRcCtrlInputCapture(timChnl_RcCtrlAccel, cntr, INPUT_CHANNEL_ACCEL_OFFSET, acceleration);
+}
+
+void tim_RcCtrlSteer_IC_CaptureCallback() {
+    static uint32_t cntr = 0;
+    onRcCtrlInputCapture(timChnl_RcCtrlSteer, cntr, INPUT_CHANNEL_STEER_OFFSET, steering);
+}
