@@ -10,8 +10,8 @@
 ]>
 
 <targetDefinitions>
-  <board id="rc_car">
-    <name>rc_car</name>
+  <board id="control-panel">
+    <name>control-panel</name>
     <dbgIF>SWD</dbgIF>
     <dbgDEV>ST-Link</dbgDEV>
     <mcuId>stm32f030k6tx</mcuId>
