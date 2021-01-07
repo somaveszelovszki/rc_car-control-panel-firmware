@@ -9,11 +9,15 @@ using namespace micro;
 
 namespace {
 
-constexpr uint32_t INPUT_CHANNEL_ACCEL_OFFSET = 80;
-constexpr uint32_t INPUT_CHANNEL_STEER_OFFSET = 35;
-constexpr float INPUT_ZERO_DEADBAND           = 0.1f;
+constexpr millisecond_t INPUT_TIMEOUT        = millisecond_t(100);
+constexpr int32_t INPUT_CHANNEL_ACCEL_OFFSET = -65;
+constexpr int32_t INPUT_CHANNEL_STEER_OFFSET = -10;
+constexpr float INPUT_ZERO_DEADBAND          = 0.25f;
+constexpr float MAX_ACCEL                    = 1.0f;
+constexpr float MAX_STEER                    = 0.7f;
+constexpr int32_t OUTPUT_STEER_OFFSET        = 200;
 
-void onRcCtrlInputCapture(const uint32_t chnl, uint32_t& prevCntr, const uint32_t offset, float& measuredValue) {
+void onRcCtrlInputCapture(const uint32_t chnl, uint32_t& prevCntr, const int32_t offset, float& measuredValue) {
     uint32_t cntr = 0;
     timer_getCaptured(tim_RcCtrl, chnl, cntr);
 
@@ -32,6 +36,9 @@ void onRcCtrlInputCapture(const uint32_t chnl, uint32_t& prevCntr, const uint32_
     prevCntr = cntr;
 }
 
+millisecond_t lastAccelTime;
+millisecond_t lastSteerTime;
+
 float acceleration = 0.0f;
 float steering     = 0.0f;
 
@@ -43,12 +50,24 @@ extern "C" void run(void) {
     while (true) {
         criticalSection_t criticalSection;
         criticalSection.lock();
-        const float accel = acceleration;
-        const float steer = steering;
+        float accel = acceleration;
+        float steer = steering;
         criticalSection.unlock();
 
-        timer_setDuty(tim_Drive, timChnl_DriveAccel, accel);
-        timer_setCompare(tim_Drive, timChnl_DriveSteer, map<float, uint32_t>(steer, -1.0f, 1.0f, 1000, 2000));
+        if (getTime() - lastAccelTime > INPUT_TIMEOUT) {
+            accel = 0.0f;
+        }
+
+        if (getTime() - lastSteerTime > INPUT_TIMEOUT) {
+            steer = 0.0f;
+        }
+
+        accel = clamp(accel, -MAX_ACCEL, MAX_ACCEL);
+        steer = clamp(steer, -MAX_STEER, MAX_STEER);
+
+        timer_setDuty(tim_Drive, timChnl_DriveAccel, abs(accel));
+        gpio_write(gpio_SpeedDir, accel >= 0.0f ? gpioPinState_t::RESET : gpioPinState_t::SET);
+        timer_setCompare(tim_Drive, timChnl_DriveSteer, map<float, uint32_t>(steer, -1.0f, 1.0f, 2000, 1000) - OUTPUT_STEER_OFFSET);
         debugLed.update(true);
     }
 }
@@ -56,9 +75,11 @@ extern "C" void run(void) {
 void tim_RcCtrlAccel_IC_CaptureCallback() {
     static uint32_t cntr = 0;
     onRcCtrlInputCapture(timChnl_RcCtrlAccel, cntr, INPUT_CHANNEL_ACCEL_OFFSET, acceleration);
+    lastAccelTime = getTime();
 }
 
 void tim_RcCtrlSteer_IC_CaptureCallback() {
     static uint32_t cntr = 0;
     onRcCtrlInputCapture(timChnl_RcCtrlSteer, cntr, INPUT_CHANNEL_STEER_OFFSET, steering);
+    lastSteerTime = getTime();
 }
